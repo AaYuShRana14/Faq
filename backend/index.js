@@ -51,24 +51,27 @@ app.post('/login',async(req,res)=>{
         res.status(500).send('Server error');
     }
 });
-app.post('/api/faqs',isLoggedin,async(req,res)=>{
-    const {question,answer}=req.body;
+app.post('/api/faqs', isLoggedin, async (req, res) => {
+    const { question, answer } = req.body;
     try {
-        let translations = {};
         const languages = ['hi', 'bn'];
-        for(let i=0;i<languages.length;i++){
-            const language = languages[i];
-            const translatedQuestion = await translate(question, {to: language});    
-            const translatedAnswer = await translate(answer, {to: language});
-            translations[language] = {question: translatedQuestion[0], answer: translatedAnswer[0]};
-        }
-        let faq=new Faq({question,answer,translations,owner:req.user.id});
+        const translationPromises = languages.map(async (language) => {
+            const translatedQuestion = await translate(question, { to: language });
+            const translatedAnswer = await translate(answer, { to: language });
+            return { [language]: { question: translatedQuestion[0], answer: translatedAnswer[0] } };
+        });
+        const translationsArray = await Promise.all(translationPromises);
+
+        const translations = Object.assign({}, ...translationsArray);
+
+        let faq = new Faq({ question, answer, translations, owner: req.user.id });
         await faq.save();
         res.status(201).send('FAQ created successfully');
     } catch (error) {
         res.status(500).send('Server error');
     }
 });
+
 app.get('/api/faqs/',async(req,res)=>{
     try {
         let lang = req.query.lang;

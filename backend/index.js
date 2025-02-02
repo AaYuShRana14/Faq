@@ -119,6 +119,6 @@ app.delete('/api/faqs/:id',isLoggedin,async(req,res)=>{
     }
 });
 app.listen(8000,()=>{
-    console.log('Server is running on port 5000');
+    console.log('Server is running on port 8000');
 });
 

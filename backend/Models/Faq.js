@@ -1,27 +1,32 @@
-const mongoose = require('mongoose');
-const Schema=mongoose.Schema;
-const faqSchema=new Schema({
-    question:{
-        type:String,
-        required:true
+const mongoose = require("mongoose");
+const Schema = mongoose.Schema;
+const faqSchema = new Schema({
+  question: {
+    type: String,
+    required: true,
+  },
+  answer: {
+    type: String,
+    required: true,
+  },
+  translations: {
+    hi: {
+      question: String,
+      answer: String,
     },
-    answer:{
-        type:String,
-        required:true
+    bn: {
+      question: String,
+      answer: String,
     },
-    translations:{
-        hi: {
-            question: { type: String },
-            answer: { type: String },
-          },
-          bn: {
-            question: { type: String },
-            answer: { type: String },
-          },
-    },
-    owner:{
-        type:mongoose.Schema.Types.ObjectId,
-        ref:'User'
-    }
+  },
+  owner: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User",
+    required: true,
+  },
+  createdAt: {
+    type: Date,
+    default: Date.now,
+  },
 });
-module.exports=mongoose.model('Faq',faqSchema);
+module.exports = mongoose.model("Faq", faqSchema);

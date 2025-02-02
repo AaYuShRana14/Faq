@@ -9,29 +9,23 @@ const app = express();
 const jwt = require("jsonwebtoken");
 const isLoggedin = require("./Middleware/isLoggedin");
 const jwtSecret = process.env.JWT_SECRET;
-connectDB();
 const cors = require("cors");
+const sanitizeHtml = require("sanitize-html");
+const {
+  redisClient,
+  connectRedis,
+  CACHE_DURATION,
+  getFaqCacheKey,
+  clearFaqCache,
+} = require("./config/redis");
+
+// Connect to MongoDB and Redis
+connectDB();
+connectRedis();
+
 app.use(cors());
 app.use(express.json());
-app.post("/signup", async (req, res) => {
-  const { name, email, password } = req.body;
-  try {
-    const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(password, salt);
-    let user = new User({ name, email, password: hashedPassword });
-    await user.save();
-    const id = user._id;
-    const token = jwt.sign({ id, email }, jwtSecret, {
-      expiresIn: "24h",
-    });
-    res.status(201).send({ msg: "User created successfully", token });
-  } catch (error) {
-    if (error.code === 11000) {
-      return res.status(400).send("User already exists");
-    }
-    res.status(500).send("Server error");
-  }
-});
+
 app.post("/login", async (req, res) => {
   const { email, password } = req.body;
   try {
@@ -55,37 +49,105 @@ app.post("/login", async (req, res) => {
 app.post("/api/faqs", isLoggedin, async (req, res) => {
   const { question, answer } = req.body;
   try {
+    const sanitizedAnswer = sanitizeHtml(answer, {
+      allowedTags: sanitizeHtml.defaults.allowedTags.concat(["img"]),
+      allowedAttributes: {
+        ...sanitizeHtml.defaults.allowedAttributes,
+        "*": ["class", "style"],
+        img: ["src", "alt", "width", "height"],
+      },
+    });
+
+    const translateHtmlContent = async (htmlContent, targetLang) => {
+      const tempDiv = new (require("jsdom").JSDOM)(
+        "<div></div>"
+      ).window.document.createElement("div");
+      tempDiv.innerHTML = htmlContent;
+
+      const translateNode = async (node) => {
+        if (node.nodeType === 3) {
+          if (node.textContent.trim()) {
+            const translatedText = await translate(node.textContent.trim(), {
+              to: targetLang,
+            });
+            node.textContent = translatedText[0];
+          }
+        } else if (node.nodeType === 1) {
+          for (let child of node.childNodes) {
+            await translateNode(child);
+          }
+        }
+      };
+
+      await translateNode(tempDiv);
+      return tempDiv.innerHTML;
+    };
+
     const languages = ["hi", "bn"];
     const translationPromises = languages.map(async (language) => {
       const translatedQuestion = await translate(question, { to: language });
-      const translatedAnswer = await translate(answer, { to: language });
+      const translatedAnswer = await translateHtmlContent(
+        sanitizedAnswer,
+        language
+      );
+
       return {
         [language]: {
           question: translatedQuestion[0],
-          answer: translatedAnswer[0],
+          answer: translatedAnswer,
         },
       };
     });
-    const translationsArray = await Promise.all(translationPromises);
 
+    const translationsArray = await Promise.all(translationPromises);
     const translations = Object.assign({}, ...translationsArray);
 
-    let faq = new Faq({ question, answer, translations, owner: req.user.id });
+    let faq = new Faq({
+      question,
+      answer: sanitizedAnswer,
+      translations,
+      owner: req.user.id,
+    });
     await faq.save();
+
+    // Clear all FAQ caches when a new FAQ is added
+    await clearFaqCache();
+
     res.status(201).send("FAQ created successfully");
   } catch (error) {
+    console.error(error);
     res.status(500).send("Server error");
   }
 });
 
 app.get("/api/faqs/", async (req, res) => {
   try {
-    let lang = req.query.lang;
-    if (lang === undefined) {
-      lang = "en";
+    const lang = req.query.lang || "en";
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 5;
+
+    let cachedData = null;
+    // Try to get data from cache
+    try {
+      const cacheKey = getFaqCacheKey(lang, page, limit);
+      cachedData = await redisClient.get(cacheKey);
+    } catch (cacheError) {
+      console.error("Cache error:", cacheError);
+      // Continue without cache
     }
-    let faqs = await Faq.find();
-    faqs = faqs.map((faq) => {
+
+    if (cachedData) {
+      return res.json(JSON.parse(cachedData));
+    }
+
+    // If not in cache, get from database
+    const skip = (page - 1) * limit;
+    const totalFaqs = await Faq.countDocuments();
+    const totalPages = Math.ceil(totalFaqs / limit);
+
+    let faqs = await Faq.find().skip(skip).limit(limit).sort({ createdAt: -1 });
+
+    const formattedFaqs = faqs.map((faq) => {
       if (lang === "en") {
         return {
           question: faq.question,
@@ -100,8 +162,34 @@ app.get("/api/faqs/", async (req, res) => {
         };
       }
     });
-    res.send(faqs);
+
+    const responseData = {
+      faqs: formattedFaqs,
+      pagination: {
+        currentPage: page,
+        totalPages,
+        totalItems: totalFaqs,
+        hasNextPage: page < totalPages,
+        hasPrevPage: page > 1,
+      },
+    };
+
+    // Try to store in cache
+    try {
+      const cacheKey = getFaqCacheKey(lang, page, limit);
+      await redisClient.setEx(
+        cacheKey,
+        CACHE_DURATION,
+        JSON.stringify(responseData)
+      );
+    } catch (cacheError) {
+      console.error("Cache storage error:", cacheError);
+      // Continue without cache
+    }
+
+    res.json(responseData);
   } catch (error) {
+    console.error("Error fetching FAQs:", error);
     res.status(500).send("Server error");
   }
 });
@@ -117,6 +205,10 @@ app.delete("/api/faqs/:id", isLoggedin, async (req, res) => {
       return res.status(401).send("Not authorized");
     }
     await Faq.findByIdAndDelete(id);
+
+    // Clear all FAQ caches when a FAQ is deleted
+    await clearFaqCache();
+
     res.send("FAQ deleted successfully");
   } catch (error) {
     res.status(500).send("Server error");
@@ -125,3 +217,5 @@ app.delete("/api/faqs/:id", isLoggedin, async (req, res) => {
 app.listen(8000, () => {
   console.log("Server is running on port 8000");
 });
+
+module.exports = app;
